@@ -32,8 +32,11 @@ function findController($url) {
 		if( !defined("CONTROLLER") ) define("CONTROLLER", $controller);
 		// include the controller file
 		require( $controllerfile );
-		// return the controller name with the first letter uppercase
-		return ucfirst( $controller );
+		// NEW: CamelCase controller (plus remove special characters)
+		$controller = str_replace(" ", "", ucwords( preg_replace("/\.|\-/", " ", $controller) ) );
+		// OLD: return the controller name with the first letter uppercase
+		//ucfirst( $controller )
+		return $controller;
 	}
 }
 
@@ -59,7 +62,7 @@ function isStatic( $file ) {
 		if (is_dir(APP."plugins/") && $handle = opendir(APP."plugins/")) {
 			while (false !== ($plugin = readdir($handle))) {
 				if ($plugin == '.' || $plugin == '..') {
-				  continue;
+					continue;
 				}
 				if ( is_dir(APP."plugins/".$plugin) && file_exists( APP."plugins/".$plugin."/public/".$file ) ) {
 					$target = APP."plugins/".$plugin."/public/".$file;
@@ -68,16 +71,25 @@ function isStatic( $file ) {
 			}
 		}
 	}
+	//check the cache (less than an hour old)
+	$cache = new Minify_Cache_File();
+	//if( $cache->isValid($file, time("now")-3600) ) return $cache->tmp() ."/". $file;
+	if( $cache->isValid("/{$_SERVER['HTTP_HOST']}/$file", 0) ) return $cache->tmp() ."/{$_SERVER['HTTP_HOST']}/". $file;
+
 	// check in the base public folders
 	if( defined("BASE") ){
 		if ( file_exists( BASE."public/".$file ) ) {
 			$target = BASE."public/".$file;
 			return $target;
 		}
+		$target = realpath(BASE."../public/".$file);
+		if ( file_exists( $target ) ){
+			return $target;
+		}
 		if (is_dir(BASE."plugins/") && $handle = opendir(BASE."plugins/")) {
 			while (false !== ($plugin = readdir($handle))) {
 				if ($plugin == '.' || $plugin == '..') {
-				  continue;
+					continue;
 				}
 				if ( is_dir(BASE."plugins/".$plugin) && file_exists( BASE."plugins/".$plugin."/public/".$file ) ) {
 					$target = BASE."plugins/".$plugin."/public/".$file;
@@ -95,10 +107,15 @@ function isStatic( $file ) {
 			return $target;
 		}
 	}
-	//lastly check the cache (less than an hour old)
-	$cache = new Minify_Cache_File();
-	//if( $cache->isValid($file, time("now")-3600) ) return $cache->tmp() ."/". $file;
-	if( $cache->isValid($file, 0) ) return $cache->tmp() ."/". $file;
+	# 110 looking into web root for plugins
+	if( is_dir( SITE_ROOT . "/plugins" ) ){
+		$files = glob(SITE_ROOT . "/plugins/*/public/$file");
+		if( $files && count($files) > 0 ) {
+			// arbitrary pick the first file - should have a comparison mechanism in place
+			$target = $files[0];
+			return $target;
+		}
+	}
 
 	// return false if there are no results
 	return false;
@@ -146,6 +163,22 @@ function getPath( $file ) {
 		$search = glob(APP."plugins/*/$file", GLOB_BRACE);
 		if($search) return array_pop($search);
 	}
+	// check the plugins folder if we still haven't found anything
+	if( defined("PLUGINS") ){
+		// find the plugins file
+		if (file_exists(PLUGINS.$file)) return PLUGINS.$file;
+		// check the plugins folder
+		$search = glob(PLUGINS."*/$file", GLOB_BRACE);
+		if($search) return array_pop($search);
+	}
+	# 110 looking into web root for plugins
+	if( is_dir( SITE_ROOT . "/plugins" ) ){
+		// find the plugins file
+		if (file_exists(SITE_ROOT ."/plugins/". $file)) return SITE_ROOT ."/plugins/". $file;
+		// check the plugins folder
+		$search = glob(SITE_ROOT ."/plugins/*/$file", GLOB_BRACE);
+		if($search) return array_pop($search);
+	}
 	// try the base folder if we didn't find anything
 	if( defined("BASE") ) {
 		// find the core file second
@@ -155,15 +188,6 @@ function getPath( $file ) {
 		$search = glob(BASE."plugins/*/$file", GLOB_BRACE);
 		if($search) return array_pop($search);
 	}
-	// check the plugins folder if we still haven't found anything
-	if( defined("PLUGINS") ){
-		// find the core file second
-		if (file_exists(PLUGINS.$file)) return PLUGINS.$file;
-		// check the plugins folder
-		$search = glob(PLUGINS."*/$file", GLOB_BRACE);
-		if($search) return array_pop($search);
-	}
-
 	// nothing checks out...
 	return false;
 }
@@ -179,9 +203,10 @@ function url($file='', $cdn=false){
 
 	} else {
 		// check if this is a secure connection
-		$domain = ( $_SERVER['SERVER_PORT'] == "443" || (defined('SSL') && SSL) ) ? 'https://' : 'http://';
+		$domain = ( isSSL() ) ? 'https://' : 'http://';
 		// load the regular server address
-		$domain .= ( substr($_SERVER['SERVER_NAME'], -1) == "/" ) ? substr($_SERVER['SERVER_NAME'], 0, -1) : $_SERVER['SERVER_NAME'];
+		//$domain .= ( substr($_SERVER['SERVER_NAME'], -1) == "/" ) ? substr($_SERVER['SERVER_NAME'], 0, -1) : $_SERVER['SERVER_NAME'];
+		$domain .= ( substr($_SERVER['HTTP_HOST'], -1) == "/" ) ? substr($_SERVER['HTTP_HOST'], 0, -1) : $_SERVER['HTTP_HOST'];
 		// add server port to the domain if not the default one
 		/*if( $_SERVER['SERVER_PORT'] != "80" && $_SERVER['SERVER_PORT'] != "443" ){
 			$domain .= ":".$_SERVER['SERVER_PORT'];
@@ -211,13 +236,31 @@ function cdn($file=''){
 	$uri = uri($file);
 	// first check if we have already defined a CDN
 	if (defined("CDN")){
+		// add protocol
+		$protocol = ( isSSL() ) ? 'https://' : 'http://';
 		// remove trailing slash, if any
-		$url = ( substr(CDN, -1) == "/" ) ? substr(CDN, 0, -1) : CDN;
-		return $url . $uri;
+		$domain = ( substr(CDN, -1) == "/" ) ? substr(CDN, 0, -1) : CDN;
+		// remove protocol from cdn address
+		$domain = ( substr($domain, 0, 4) == "http" ) ? str_replace(array("http://", "https://"), "", $domain) : $domain;
+		// #108 remove www from cdn address (if set by SERVER_NAME)
+		$domain = str_replace("www.",'',$domain);
+		return $protocol . $domain . $uri;
 	} else {
 		// fallback to the domain name
 		return url($file);
 	}
+}
+
+// checks various server config to see if
+function isSSL(){
+	// this is an enviromenal variable set manually
+	if(defined('SSL') && SSL) return true;
+	if( array_key_exists('HTTPS', $_SERVER) &&  $_SERVER['HTTPS'] == true ) return true;
+	if( array_key_exists('SERVER_PORT', $_SERVER) &&  $_SERVER['SERVER_PORT'] == "443" ) return true;
+	if( array_key_exists('HTTP_X_FORWARDED_PROTO', $_SERVER) &&  substr( $_SERVER['HTTP_X_FORWARDED_PROTO'], 0, 5 ) == "https" ) return true;
+	if( array_key_exists('HTTP_X_FORWARDED_PORT', $_SERVER) &&  substr( $_SERVER['HTTP_X_FORWARDED_PORT'], 0, 3 ) == "443" ) return true;
+	// in all other cases return false
+	return false;
 }
 
 // return an html attribute for a value
@@ -251,6 +294,14 @@ function findFiles($filename) {
 		if( is_array( $files) ){
 			$return = array_merge($return, $files);
 		}
+	}
+	# 110 looking into web root for plugins
+	if( is_dir( SITE_ROOT . "/plugins" ) ){
+		$files = glob(SITE_ROOT . "/plugins/*/views/$filename");
+		if( is_array( $files) ){
+			$return = array_merge($return, $files);
+		}
+
 	}
 	return $return;
 }
@@ -391,7 +442,9 @@ function check_dir( $file=false, $create=false, $chmod=0755 ){
 		$dirs = explode("/", $info['dirname']);
 		$path = "/";
 		foreach( $dirs as $folder){
-			$path .= array_shift($dirs) ."/";
+			//$path .= array_shift($dirs) ."/";
+			if(empty($folder)) continue;
+			$path .= $folder ."/";
 			// create each dir (if not available)
 			if( !is_dir( $path ) ) @mkdir($path, $chmod, true);
 		}
@@ -399,6 +452,14 @@ function check_dir( $file=false, $create=false, $chmod=0755 ){
 	}
 	// assuming that all the folders missing are created...
 	return true;
+}
+
+// Get a normalized numeric epoch timestamp in microseconds
+function timestamp(){
+	$timestamp = (string) $_SERVER['REQUEST_TIME'];
+	// aws:#5 include microseconds when calculating REQUEST_TIME in PHP < 5.4
+	if( strlen($timestamp) == 10 ) $timestamp .= "000";
+	return $timestamp;
 }
 
 /**
@@ -416,8 +477,10 @@ function check_dir( $file=false, $create=false, $chmod=0755 ){
  */
 function get_time_difference( $start, $end )
 {
-	$uts['start']      =    strtotime( $start );
-	$uts['end']        =    strtotime( $end );
+	// FIX use timestamps instead of strings
+	$uts['start']      =    ( is_nan($start) ) ? strtotime( $start ) : time($start);
+	$uts['end']        =    ( is_nan($end) ) ? strtotime( $end ) : time($end);
+
 	if( $uts['start']!==-1 && $uts['end']!==-1 )
 	{
 		if( $uts['end'] >= $uts['start'] )
@@ -444,6 +507,25 @@ function get_time_difference( $start, $end )
 	return( false );
 }
 
+// setup config options and (optionally) merge with remote config file
+function config($type=false, $config=array()){
+	//prerequisite(s)
+	if( !$type ) return;
+	// variables
+	$data = array();
+
+	// optionally lookup in external path
+	if( defined('CONFIG') ){
+		// load external file
+		$data = ( file_exists(CONFIG . $type .".json") ) ? json_decode( file_get_contents(CONFIG . $type .".json"), true) : array();
+	}
+
+	foreach($config as $k => $v){
+		// loaded config had priority
+		$value = ( array_key_exists($k, $data) ) ? $data[$k] : $v;
+		Config::register($type, $k, $value);
+	}
+}
 
 /********************************
  * Retro-support of get_called_class()
@@ -610,6 +692,42 @@ function decode($string="",$base=36,$key="KISSCMS") {
 	return $hash;
 }
 
+// get's the modified time of a url
+function urlmtime( $url = false ){
+	if( !$url ) return 0;
+	// variables
+	$last_modified = false;
+	/* OLD metod:
+	// get the headers
+	$headers = get_headers($url);
+	if( !is_array($headers) ) return 0;
+	// find the 'last-modified' attribute
+	foreach( $headers as $header ){
+		if( strpos( strtolower($header), 'last-modified' ) !== false  ){
+			$col = strpos($header,':');
+			$last_modified = trim(substr($header,$col+1));
+			break;
+		}
+	}
+	*/
+	$parsed_url = parse_url($url);
+	$path = $parsed_url['path'];
+
+	if ($path[0] == "/") {
+		$filename = $_SERVER['DOCUMENT_ROOT'] . $path;
+	} else {
+		$filename = $path;
+	}
+
+	if (file_exists($filename)) {
+		$last_modified = date('YmdHis', filemtime($filename));
+	}
+
+	if( !$last_modified ) return 0;
+	// convert to timestamp
+	$mtime = strtotime( $last_modified );
+	return $mtime;
+}
 /*
 function redirect($url,$alertmsg='') {
   if ($alertmsg)

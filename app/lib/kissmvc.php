@@ -241,6 +241,9 @@ class KISS_Model  {
 			}
 		$sql = 'INSERT INTO '.$this->enquote($this->tablename).' ('.substr($s1,1).') VALUES ('.substr($s2,1).')';
 		$stmt = $dbh->prepare($sql);
+		// error control
+		if( !$stmt ) return $this;
+		// loop through schema
 		$i=0;
 		foreach ($this->rs as $k => $v)
 			if ($k!=$pkname || $v)
@@ -256,6 +259,8 @@ class KISS_Model  {
 		$dbh=$this->getdbh();
 		$sql = 'SELECT * FROM '.$this->enquote($this->tablename).' WHERE '.$this->enquote($this->pkname).'=?';
 		$stmt = $dbh->prepare($sql);
+		// error control
+		if( !$stmt ) return $this;
 		$stmt->bindValue(1,(int)$pkvalue);
 		$stmt->execute();
 		$rs = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -274,6 +279,8 @@ class KISS_Model  {
 		$s = substr($s,1);
 		$sql = 'UPDATE '.$this->enquote($this->tablename).' SET '.$s.' WHERE '.$this->enquote($this->pkname).'=?';
 		$stmt = $dbh->prepare($sql);
+		// #120 - if preparation failed exist now
+		if( !$stmt ) return;
 		$i=0;
 		foreach ($this->rs as $k => $v)
 			$stmt->bindValue(++$i,is_scalar($v) ? $v : ($this->COMPRESS_ARRAY ? gzdeflate(serialize($v)) : serialize($v)) );
@@ -285,6 +292,8 @@ class KISS_Model  {
 		$dbh=$this->getdbh();
 		$sql = 'DELETE FROM '.$this->enquote($this->tablename).' WHERE '.$this->enquote($this->pkname).'=?';
 		$stmt = $dbh->prepare($sql);
+		// error control
+		if( !$stmt ) return $this;
 		$stmt->bindValue(1,$this->rs[$this->pkname]);
 		return $stmt->execute();
 	}

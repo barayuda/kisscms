@@ -31,6 +31,9 @@ class Config extends Model {
 		// we already know the key doesn't exist - just create it
 		$config = new Config(0, $table);
 		$config->set('key', "$key");
+		// FIX: special case for admin password (use cipher if available)
+		$cipher = ( is_null(CIPHER) ) ? $value : CIPHER;
+		$value = ( $key == "admin_password" ) ? crypt($value, $cipher) : $value;
 		$config->set('value', "$value");
 		$config->create();
 		// save in the global object
@@ -83,5 +86,18 @@ class Config extends Model {
 		// possibly do something with $result here
 		}
 	}
+
+	// Shim for backward compatibility (no id)
+	function update(){
+		if( $this->rs['id'] == 0 ){
+			// remove zero id
+			unset($this->rs['id']);
+			// use keys instead
+			$this->pkname = "key";
+		}
+		// continue
+		parent::update();
+	}
+
 }
 ?>

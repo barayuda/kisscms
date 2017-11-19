@@ -22,14 +22,6 @@ class Page_Controller extends KISS_Auth {
 		$this->render();
 	}
 
-
-	// Main render method
-	function render() {
-
-		// display the page
-		Template::output($this->data);
-	}
-
 	// - Helpers
 	function getPage( ) {
 
@@ -45,18 +37,21 @@ class Page_Controller extends KISS_Auth {
 		// see if we have found a page
 		if( $page->get('id') ){
 			// store the information of the page
+			/*
 			$data['id'] = $this->data['id'] = $page->get('id');
 			$data['title'] = stripslashes( $page->get('title') );
 			$data['content'] = stripslashes( $page->get('content') );
 			$data['tags'] = stripslashes( $page->get('tags') );
 			$data['date'] = strtotime( stripslashes( $page->get('date') ) );
+			*/
+			$data = $page->getAll();
 			// check if the page has been classified as a category
 			$this->category = ( strpos( $data['tags'], "category" ) > -1) ? true : false;
 
 			$data['path']= $this->data['path'];
-			$data['view'] = getPath('views/main/body.php');
+			//$data['view'] = getPath('views/main/body.php');
 			$this->data['body'][] = $data;
-			// FIX #38: copy data of "static" pages in a seperate array for easy access
+			// FIX #38: copy data of "static" pages in a separate array for easy access
 			$this->data['_page'] = $data;
 			$this->data['template'] = stripslashes( $page->get('template') );
 			return true;

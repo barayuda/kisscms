@@ -37,6 +37,7 @@ class Section {
 		if(!$class){
 			$class = get_called_class();
 		}
+
 		// 1st fallback - a view named as the section class name
 		if(!$file = getPath('views/sections/'. $view .'.php')) $view  = strtolower( $class );
 		// 2nd fallback - use the default view
@@ -48,6 +49,8 @@ class Section {
 
 		if( class_exists ( $class ) ){
 			$section = new $class($view, $vars, $data);
+			// #113 auto-render if using the base section class
+			if($class == "Section") $section->render();
 		}
 	}
 
@@ -91,12 +94,15 @@ class Copyright extends Section {
 	function __construct($view=false, $vars=false, $data=false){
 		parent::__construct($view,$vars);
 		if( array_key_exists('db_config', $GLOBALS) ){
-			// get site author
+			// get data (is a db query necessary?)
 			$dbh = $GLOBALS['db_config'];
-			$sql = 'SELECT value FROM "main" WHERE "key"="site_author"';
+			// get config
+			$sql = 'SELECT key,value FROM "main"';
 			$results = $dbh->query($sql);
+			// find related vars
 			while ($v = $results->fetch(PDO::FETCH_ASSOC)) {
-				$this->data['author'] = $v['value'];
+				if( $v['key'] == "site_author" ) $this->data['author'] = $v['value'];
+				if( $v['key'] == "site_author_url" ) $this->data['author_url'] = $v['value'];
 			}
 			// get year
 			$this->data['year'] = date("Y", time() );

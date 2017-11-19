@@ -12,24 +12,31 @@ class Template extends KISS_View {
 	function __construct( $vars=array() ) {
 		// defaults
 		$this->vars = array(
-			"body" => ""
+			"body" => "",
+			"_page" => array(
+				"view" => ""
+			)
 		);
+		$this->client = array();
 		$this->vars = array_merge($this->vars, $vars);
 
 		$this->hash = $this->getHash("", $vars);
 		$file = $this->getTemplate();
-		$this->client = array();
 
 		parent::__construct($file, $this->vars);
 	}
 
 	public static function output($vars=''){
+		// variables
 		$template = new Template($vars);
-		// first thing, check if there's a cached version of the template
-		$id = "html/". $_SERVER['HTTP_HOST'] ."_". $template->hash;
-		$cache = self::getCache( $id );
+		$cache = null;
+		$id = "{$_SERVER['HTTP_HOST']}/html/". $template->hash;
+		// get available cache (if applicable)
+		if( $template->canCache() )
+			// first thing, check if there's a cached version of the template
+			$cache = self::getCache( $id );
 		//$cache = false;
-		if($cache && !DEBUG) { echo $cache; return; }
+		if( !empty($cache) && !DEBUG) { echo $cache; return; }
 		// continue processing
 		$template->setupClient();
 		//
@@ -38,7 +45,8 @@ class Template extends KISS_View {
 		$GLOBALS['foot'] = $template->get("foot");
 
 		// compile the page with the existing data
-		$output = parent::do_fetch($template->file, $template->vars);
+		$output = $template->do_fetch($template->file, $template->vars);
+
 		// post-process (in debug with limited features)
 		$output = $template->process($output);
 		// output the final markup - clear whitespace (if not in debug mode)
@@ -48,7 +56,9 @@ class Template extends KISS_View {
 	}
 
 	public static function head( $vars=false ){
+
 		$data = $GLOBALS['head'];
+
 		foreach($data as $name=>$html){
 			echo "$html\n";
 		}
@@ -56,22 +66,40 @@ class Template extends KISS_View {
 
 	public static function body($view=false){
 		$data = $GLOBALS['body'];
+		if( empty($data) ) return;
 		foreach($data as $part){
-			if ( $view && !isset($part['status']) )
-			  View::do_dump( getPath('views/main/body-'. $view .'.php'), $part);
-			elseif ( array_key_exists('view', $part) )
-			  View::do_dump( $part['view'], $part);
-			else
-			  View::do_dump( getPath('views/main/body.php'), $part);
+			if( $view && !isset($part['status']) ){
+				View::do_dump( getPath('views/main/body-'. $view .'.php'), $part);
+			} elseif( array_key_exists('view', $part) ){
+				View::do_dump( $part['view'], $part);
+			} else {
+				View::do_dump( getPath('views/main/body.php'), $part);
+			}
 		}
 	}
 
 	public static function foot($vars=false){
-		$data = $GLOBALS['foot'];
-		foreach($data as $name=>$html){
+		$views = $GLOBALS['foot'];
+		// FIX: render main foot last
+		if( array_key_exists('main', $views) ){
+			$main = $views['main'];
+			unset($views['main']);
+		}
+		foreach($views as $name=>$html){
 			echo "$html\n";
 		}
+		if( isset($main) ){
+			echo $main ."\n";
+		}
 	}
+
+	static function do_fetch($file='',$vars='') {
+		$view = parent::do_fetch($file,$vars);
+		// post-event
+		Event::trigger('template:parse', $view, $vars );
+		return $view;
+	}
+
 	/*
 	function display($data='', $names=''){
 		if (is_array($data))
@@ -89,8 +117,8 @@ class Template extends KISS_View {
 		$files = findFiles( $name.'.php' );
 
 		foreach($files as $view){
-			 $section = $this->getSection( $view );
-			 $data[$section] = View::do_fetch( $view, $this->vars);
+			$section = $this->getSection( $view );
+			$data[$section] = View::do_fetch( $view, $this->vars);
 		}
 		return $data;
 	}
@@ -111,35 +139,41 @@ class Template extends KISS_View {
 			$dom = $min->less($dom, $this->template);
 			$dom = $min->css($dom, $this->template);
 			$dom = $min->js($dom, $this->template);
+		} else if( $this->useRequire() ) {
+			// require is "on" in debug mode
+			$dom = $min->requireDebug($dom, $this->template);
 		}
 		// process require configuration
 		$this->createClient($dom);
 
 		$output = $dom->saveHTML();
 
-		// output the final markup - clear whitespace
-		return  ( DEBUG ) ? $output : $this->trimWhitespace( $output );
+		// output the final markup - minify if not in debug
+		return  ( DEBUG ) ? $output : $min->html( $output );
 
 	}
 
 
 	// Helpers
 	function getHash( $prefix="", $vars=array() ){
+		// OLD
 		// the hash is an expression of the variables compiled to render the template
 		// note that constantly updated values (like timestamps) should be avoided to allow the hash to be reproduced...
-		$string = serialize( $vars );
-		// ALTERNATE method
+		//$string = serialize( $vars );
+
+		// NEW method
 		// the hash is a combination of :
+		// - the protocol
 		// - the request url
 		// - the request parameters
 		// - the session id
-		// - the user id (if available)
-		//$string = $_SERVER['REQUEST_URI'];
-		//$string .= serialize( $_REQUEST );
-		//$string .= session_id();
-		//if( isset($_SESSION['user']['id']) ) $string .= $_SESSION['user']['id'];
+		//
+		$protocol = ( isSSL() ) ? "secure": "public";
+		// use serialize( $_REQUEST ) instead?
+		$key = session_id() . json_encode($_REQUEST) . $protocol . $_SERVER['REQUEST_URI'];
 		// generate a hash form the string
-		return $prefix . hash("md5", $string);
+		return $prefix . hash("md5", $key);
+
 	}
 	static function getCache($file ){
 		$cache = new Minify_Cache_File();
@@ -156,7 +190,11 @@ class Template extends KISS_View {
 		$cache = new Minify_Cache_File();
 		$cache->store($file, $data);
 	}
-
+	function canCache(){
+		// currently only admin urls are excluded, in the future this may be extensible
+		$valid = ( strpos($_SERVER['REQUEST_URI'], "/admin/") !== 0 );
+		return $valid;
+	}
 
 	function getTemplate(){
 		// support for mobile template
@@ -167,7 +205,10 @@ class Template extends KISS_View {
 			// strip out the php extension (if supplied)
 			$this->template = str_replace(".php", "", $template);
 		}
-		return TEMPLATES.$this->template.".php";
+		// #124 - fallback to the default template of the base folder
+		$default = realpath(BASE. "../public/templates/default.php");
+
+		return ( is_file(TEMPLATES.$this->template.".php") ) ? TEMPLATES.$this->template.".php" : $default;
 	}
 
 	// find the section a view file belongs to
@@ -176,7 +217,7 @@ class Template extends KISS_View {
 		if( preg_match('/[a-z0-9_.\/\\\]plugins[a-z0-9_.\/\\\]*$/i', $file, $match) ) {
 			// $match =  /plugins/{section}/views/file.php
 			$path = explode("/", $match[0]);
-			// the lovation of the section is rather hardcoded here but there must be a better way...
+			// the location of the section is rather hardcoded here but there must be a better way...
 			$section = $path[2];
 		//otherwise it is in the main BASE or APP view folder
 		} else {
@@ -212,7 +253,7 @@ class Template extends KISS_View {
 		if( is_file( $file ) ) $json = file_get_contents( $file );
 		$libs = ( !empty( $json ) ) ? json_decode($json, true) : array();
 
-		if( !DEBUG ){
+		if( $this->useRequire() ){
 			// merge the libs with the client globals
 			$GLOBALS['client']['require'] = array_merge($GLOBALS['client']['require'], $libs);
 		} else {
@@ -229,7 +270,7 @@ class Template extends KISS_View {
 		}
 		// if in debug, remove any scripts in the require.js paths
 		$scripts = ( !empty($this->client['require']['paths']) );
-		if(DEBUG && $scripts) {
+		if( (DEBUG || !$this->useRequire() ) && $scripts ){
 			// add the scripts in the require list as script tags
 			$head = $dom->getElementsByTagName("head")->item(0);
 
@@ -249,8 +290,9 @@ class Template extends KISS_View {
 		}
 		// render the global client vars
 		$client .= 'Object.extend(KISSCMS, '. json_encode_escaped( $GLOBALS['client'] ) .');';
-		$client .= 'require.config( KISSCMS["require"] );';
-
+		if( $this->useRequire() ){
+			$client .= 'if(typeof require != "undefined") require.config( KISSCMS["require"] );';
+		}
 		$client = $this->trimWhitespace($client);
 		// #87 not caching client vars as a file
 		/*
@@ -330,8 +372,12 @@ class Template extends KISS_View {
 	}
 
 	function trimWhitespace( $string ){
-		// replace multiple spaces with one
-		return preg_replace( '/\s+/', ' ', $string );
+		// replace multiple spaces with one (except textarea)
+		return preg_replace( '/(?:\s+(?![^<]*<\/(textarea|pre)>))/', ' ', $string );
+	}
+
+	function useRequire(){
+		return defined("REQUIRE") || !DEBUG;
 	}
 
 }

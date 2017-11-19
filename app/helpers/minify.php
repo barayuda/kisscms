@@ -104,7 +104,7 @@ class Minify extends UglifyJS {
 
 
 		// process minification
-		$group = $this->uglifyJS( $group );
+		$group = $this->compileJS( $group );
 		// process requireJS
 		$dom = $this->requireJS( $group, $dom );
 
@@ -129,7 +129,7 @@ class Minify extends UglifyJS {
 		$http->setMethod('GET');
 		// (re)set the source files
 		$this->_srcs = array();
-		$cache_path = $this->cache->getPath() ."/assets/css/";
+		$cache_path = $this->_getCacheDir() ."assets/css/";
 		// filter the scripts
 		$tags = $dom->getElementsByTagName('link');
 
@@ -154,7 +154,7 @@ class Minify extends UglifyJS {
 		foreach ($el as $group=>$styles){
 			// get the raw css
 			$css = "";
-			$md5 = "";
+			//$md5 = "";
 			foreach ($styles as $style){
 				$result = $http->execute( $style );
 				if( $result && !empty($result) ){
@@ -162,13 +162,14 @@ class Minify extends UglifyJS {
 				}
 			}
 			// get the signature
-			$md5 .= md5($css);
+			//$md5 .= md5($css);
 			// remove comments
-			$css = $this->removeCommentsCSS($css);
+			$css = $this->_trimCSSComments($css);
 			// strip whitspace
-			$css = $this->trimWhitespace($css);
+			$css = $this->_trimCSSWhitespace($css);
 			$this->_content[$group] = $css;
-			$this->_srcs[$group] = $cache_path ."$group.$md5.min.css";
+			//$this->_srcs[$group] = $cache_path ."$group.$md5.min.css";
+			$this->_srcs[$group] = $cache_path ."$group.css";
 		}
 
 		// remove the 'old' link tags
@@ -177,7 +178,7 @@ class Minify extends UglifyJS {
 		}
 
 		// save css in file
-		$this->write();
+		$this->output();
 		// update the dom
 		$dom = $this->update( $dom );
 
@@ -191,16 +192,17 @@ class Minify extends UglifyJS {
 		// if in debug no need to change anything
 		if( DEBUG ) return $dom;
 
+		$timestamp = strtotime("now");
 		$el = array();
 		$target = array();
 		$less = new lessc;
 		$http = new Http();
 		$http->setMethod('GET');
 		// make this a config option?
-		$baseUrl =  "/assets/css/";
+		$baseUrl =  "assets/css/";
 		// (re)set the source files
 		$this->_srcs = array();
-		$cache_path = $this->cache->getPath() . $baseUrl;
+		$cache_path = $this->_getCacheDir() . $baseUrl;
 		// filter the scripts
 		$tags = $dom->getElementsByTagName('link');
 
@@ -217,7 +219,7 @@ class Minify extends UglifyJS {
 		foreach ($target as $tag){
 			// get the raw css
 			$css = "";
-			$md5 = "";
+			//$md5 = "";
 			$href = $tag->getAttribute('href');
 			// check if it's a local url
 			$local = (substr($href, 0, 4) !== "http");
@@ -230,25 +232,26 @@ class Minify extends UglifyJS {
 
 			$css = $less->compile( $result );
 			// get the signature
-			$md5 = md5($css);
+			//$md5 = md5($css);
 			// remove comments
-			$css = $this->removeCommentsCSS($css);
+			$css = $this->_trimCSSComments($css);
 			// strip whitspace
-			$css = $this->trimWhitespace($css);
+			$css = $this->_trimCSSWhitespace($css);
 			$this->_content[] = $css;
-			$filename =  basename($href, ".less").".$md5.min.css";
+			//$filename =  basename($href, ".less").".$md5.min.css";
+			$filename =  basename($href, ".less").".css";
 			$this->_srcs[] = $cache_path . $filename;
 
 			// always leave the less link tags as markup - will be parced by the css()
 			// change the attributes to css
 			$tag->setAttribute("rel", "stylesheet");
 			// change the link to its compiled version
-			$tag->setAttribute("href", $baseUrl . $filename);
+			$tag->setAttribute("href", cdn($baseUrl . $filename ."?t=". $timestamp) );
 
 		}
 
 		// save compiled files
-		$this->write();
+		$this->output();
 
 		// remove any instances of the less lib
 		$scripts = $dom->getElementsByTagName('script');
@@ -263,7 +266,135 @@ class Minify extends UglifyJS {
 
 	}
 
-	function write() {
+	function html( $markup ){
+		// remove whitspace
+		$markup = $this->_trimHTMLWhitespace( $markup );
+		// remove comments
+		$markup = $this->_trimHTMLComments( $markup );
+		// return minified markup
+		return $markup;
+	}
+
+	// Helpers
+
+	function requireDebug( $dom=false, $file=false ){
+
+		$client = "";
+		$group = array();
+		$remove = array();
+		//
+		$group_names = array();
+		// make this a config option?
+		$baseUrl =  "assets/js/";
+
+		// FIX: create the dir if not available
+		//if( !is_dir( APP. "public/". $baseUrl ) ) mkdir(APP. "public/". $baseUrl, 0775, true);
+		//if( !is_dir( APP. "public/js/" ) ) mkdir(APP. "public/js/", 0775, true);
+
+
+		// filter the scripts
+		$scripts = $dom->getElementsByTagName('script');
+
+		// check the script attributes
+		foreach ($scripts as $script){
+			// check out for the supported script attributes
+			$data = array();
+			$id = $script->getAttribute('id');
+			$data['path'] = $script->getAttribute('data-path');
+			$data['deps'] = $script->getAttribute('data-deps');
+			$data['group'] = $script->getAttribute('data-group');
+			$data['order'] = (int) $script->getAttribute('data-order');
+			$data['encode'] = $script->getAttribute('data-encode');
+			$type = $script->getAttribute('data-type');
+			// remove domain name from src (if entered)
+			$src = str_replace( array( url(), cdn() ),"/", $script->getAttribute('src') );
+
+			// register types
+			$data['minify'] = false;
+			$data['require'] = strpos($type, "require") > -1 || !empty($data['path']);
+
+			// leave standard types alone
+			if( !$data['require'] ) continue;
+
+			// flags
+			// - Leave inline scripts in place
+			$inline = empty($src);
+
+			// remove if not the intended container
+			if( !$inline && $data['require'] ) $remove[] = $script;
+
+			if( $inline ) {
+				// #94 check dependencies
+				if( !empty( $data['deps'] ) ){
+					$deps = explode(",", $data['deps']);
+					$client .= "require(". json_encode( $deps ) .", function(){ ". $script->textContent ." });";
+				}
+				// no further processing required
+				continue;
+			}
+
+			if( !empty($data['path']) ){
+				$name = $data['path'];
+			} else {
+				//get the name from the script src
+				$name = str_replace( array(WEB_FOLDER.$baseUrl, url(), cdn() ),"", $src);
+				// remove the .js extension if not a full path and no alias set (require.js conditions :P)
+				if( substr($name, 0,1) !=  "/"  && empty($data['path']) ) $name = substr($name , 0, -3);
+			}
+			// there is no grouping if there's no minification :P
+			$group[$name][] = array( "src" => $src, "data" => $data );
+			/*
+			if( $data['minify'] && !empty($data['group']) ) {
+				$group[$data['group']][] = array( "src" => $src, "data" => $data );
+			} else if( $data['minify'] ) {
+			//} else if( $data['minify'] && !$data['require'] ) {
+				// group all files to be minified in one file (under the template name)
+				$group[$file][] = array( "src" => $src, "data" => $data );
+			} else {
+				$group[$name][] = array( "src" => $src, "data" => $data );
+			}
+			*/
+
+			// save group name
+			if( !empty( $data['group'] ) ) {
+				$group_names[$data['group']][] = $name;
+			}
+		}
+		// replace all deps that contain group names
+		foreach($group as $i => $g){
+			// inside group
+			foreach($g as $j => $s){
+			// inside script
+			if( empty( $s['data']['deps'] ) ) continue;
+			$deps = explode(",", $s['data']['deps']);
+			foreach( $group_names as $n => $libs ){
+				if( in_array( $n, $deps ) ){
+					$key = array_search($n, $deps);
+					$deps[ $key ] = implode(",", $libs);
+				}
+			}
+			$group[$i][$j]['data']['deps'] = implode(",", $deps);
+			}
+		}
+
+		// process requireJS
+		$dom = $this->requireJS( $group, $dom );
+
+		// remove all modified scripts
+		foreach($remove as $script){
+			$script->parentNode->removeChild($script);
+		}
+
+		$GLOBALS['client']["_src"] = $client;
+
+		return $dom;
+
+	}
+
+
+	//
+
+	function output() {
 
 		foreach($this->_srcs as $name=>$cache_file){
 
@@ -301,13 +432,15 @@ class Minify extends UglifyJS {
 	// update the DOM
 	function update( $dom ){
 
+		$timestamp = strtotime("now");
 		//main dom containers
 		$head = $dom->getElementsByTagName("head")->item(0);
 		$require_main = $dom->getElementById("require-main");
+		$cache_dir = $this->_getCacheDir();
 
 		foreach($this->_srcs as $name=>$min_file){
 
-			$file = str_replace( $this->cache->getPath() ."/", "", $min_file);
+			$file = str_replace( $cache_dir, "", $min_file);
 			// backwards compatibility - remove old path
 			$file = str_replace(APP ."public/", "", $file);
 			$ext = substr( $file, strrpos($file, ".")+1 );
@@ -320,13 +453,13 @@ class Minify extends UglifyJS {
 					if( is_null($container) ){
 						$tag = $dom->createElement('link');
 						$tag->setAttribute("type", "text/css");
-						$tag->setAttribute("href", cdn($file));
+						$tag->setAttribute("href", cdn($file ."?t=". $timestamp));
 						$tag->setAttribute("rel", "stylesheet");
 						$tag->setAttribute("media", "screen");
 						// append at the end of the head section
 						$head->appendChild($tag);
 					} else {
-						$container->setAttribute("href", cdn($file));
+						$container->setAttribute("href", cdn($file ."?t=". $timestamp));
 						// remove data* attributes
 						$container->removeAttribute("data-group");
 						$container->removeAttribute("data-type");
@@ -338,10 +471,10 @@ class Minify extends UglifyJS {
 					if( is_null($container) ){
 						$tag = $dom->createElement('script');
 						$tag->setAttribute("type", "text/javascript");
-						$tag->setAttribute("src", cdn($file));
+						$tag->setAttribute("src", cdn($file ."?t=". $timestamp));
 						$tag->setAttribute("defer", "defer");
 					} else {
-						$container->setAttribute("src", cdn($file));
+						$container->setAttribute("src", cdn($file ."?t=". $timestamp));
 						// remove data* attributes
 						$container->removeAttribute("data-group");
 						$container->removeAttribute("data-type");
@@ -357,7 +490,7 @@ class Minify extends UglifyJS {
 
 	}
 
-	function uglifyJS( $scripts ){
+	function compileJS( $scripts ){
 		// make this a config option?
 		$baseUrl =  "assets/js/";
 		$http = new Http();
@@ -365,8 +498,8 @@ class Minify extends UglifyJS {
 		// sort results
 		//ksort_recursive( $minify );
 		// record signature
-		$md5 = "";
-		$cache_path = $this->cache->getPath() ."/$baseUrl";
+		//$md5 = "";
+		$cache_path = $this->_getCacheDir() ."$baseUrl";
 		// FIX: create the dir if not available
 		if( !is_dir( $cache_path ) ) mkdir($cache_path, 0775, true);
 
@@ -374,6 +507,7 @@ class Minify extends UglifyJS {
 		foreach( $scripts as $name=>$group ){
 			$first = current($group);
 			$result = "";
+			$timestamp = 0;
 			// go to next group if minify flag is not true
 			if( !$first["data"]['minify'] ) continue;
 			$min = new UglifyJS();
@@ -389,6 +523,10 @@ class Minify extends UglifyJS {
 				$local = (substr($href, 0, 4) !== "http" || substr($href, 0, 2) !== "//" );
 				if( $local ) $href = url( $href );
 				$result .= $http->execute( $href );
+				// get modified time
+				$mtime = urlmtime($href);
+				// compare with newest file in the group
+				if( $timestamp < $mtime ) $timestamp = $mtime;
 				//$src = str_replace( array(url(), cdn() ),"", $script["src"] );
 				// remove leading slash
 				//$src = ltrim($src,'/');
@@ -396,12 +534,15 @@ class Minify extends UglifyJS {
 			}
 			// compress signatures of all files
 			$md5 = md5( $result );
+			// set timestamp
+			$min->timestamp( $timestamp );
 			//contents of each group are saved in a tmp file
 			$tmp_file = $cache_path . "tmp.$md5.js";
 			file_put_contents($tmp_file, $result);
 			// add tmp file
 			$min->add( $tmp_file );
-			$min->setFile( "$name.$md5.min" );
+			//$min->setFile( "$name.$md5.min" );
+			$min->setFile( "$name" );
 			if( !DEBUG){
 				$min->quiet()
 					->hideDebugInfo();
@@ -424,9 +565,9 @@ class Minify extends UglifyJS {
 			}
 
 			$min->write();
-
+			$min->clear();
 			// add the signature in the group
-			$scripts[$name][]["data"]["md5"] = $md5;
+			//$scripts[$name][]["data"]["md5"] = $md5;
 
 		}
 
@@ -441,11 +582,12 @@ class Minify extends UglifyJS {
 			//$first = current($group);
 			$attr = $this->groupAttributes($group);
 			// signature of file/group
-			$md5 = ( !empty( $attr['data']['md5'] ) ) ? $attr['data']['md5'] : false;
+			//$md5 = ( !empty( $attr['data']['md5'] ) ) ? $attr['data']['md5'] : false;
 			// get file of the group
 			if( $attr['data']['minify'] ) {
 				$file = $GLOBALS['client']['require']['baseUrl'] . $name;
-				$file .= ( $md5 ) ? ".". $md5 .".min.js" : ".min.js";
+				//$file .= ( $md5 ) ? ".". $md5 .".min.js" : ".min.js";
+				$file .= ".js";
 				$file = cdn( $file );
 			} else {
 				$file = $attr["src"];
@@ -471,10 +613,9 @@ class Minify extends UglifyJS {
 				}
 
 				// if there is a signature we'll have to create a new path for the group
-				if ( $md5 ){
-					$GLOBALS['client']['require']['paths'][$name] =  substr( $file, 0, -3);
-
-				}
+				//if ( $md5 ){
+				//	$GLOBALS['client']['require']['paths'][$name] =  substr( $file, 0, -3);
+				//}
 
 				// push the name of the groups as the dependency
 				array_push( $GLOBALS['client']['require']['deps'], $name);
@@ -528,7 +669,6 @@ class Minify extends UglifyJS {
 		return $attr;
 	}
 
-/*
 	function setFile( $name=false ) {
 		if($name) $this->_file = $name;
 		return $this;
@@ -537,13 +677,19 @@ class Minify extends UglifyJS {
 	function _getCacheFileName() {
 		return ( empty($this->_file) ) ? $this->_cache_dir . $this->_getHash() . ".js" : $this->_cache_dir . $this->_file. ".js";
 	}
-*/
-	function trimWhitespace( $string, $replace=" " ){
+
+	function _getCacheDir() {
+		return $this->cache->getPath() ."/{$_SERVER['HTTP_HOST']}/";
+	}
+
+	// CSS methods
+
+	function _trimCSSWhitespace( $string, $replace=" " ){
 		// replace multiple spaces with one
 		return preg_replace( '/\s+/', $replace, $string );
 	}
 
-	function removeCommentsCSS( $string ){
+	function _trimCSSComments( $string ){
 		$regex = array(
 			"!/\*.*?\*/!s"=>'',
 			"/\n\s*\n/"=>"\n"
@@ -552,6 +698,19 @@ class Minify extends UglifyJS {
 
 		return $string;
 	}
+
+	// HTML methods
+
+	function _trimHTMLWhitespace( $string ){
+		// replace multiple spaces with one (except textarea)
+		return preg_replace( '/(?:\s+(?![^<]*<\/(textarea|pre)>))/', ' ', $string );
+	}
+
+	function _trimHTMLComments( $string ){
+		// remove comments
+		return preg_replace( '/<!--(.*?)-->/', ' ', $string );
+	}
+
 	// deprecate...
 	function updateDom($tag, $dom){
 		// switch based on the type of tag (script,link)
@@ -570,12 +729,15 @@ class Minify extends UglifyJS {
 		return $dom;
 	}
 
+	// Cache methods
+
 	function getCache($path ){
 		$cache = new Minify_Cache_File();
 		// check if the file is less than an hour old
 		//return ( $cache->isValid($path, time("now")-3600) ) ? $cache->fetch($path) : false;
 		return $cache->fetch($path);
 	}
+
 	function setCache($path, $content){
 		$cache = new Minify_Cache_File();
 		$cache->store($path, $content);

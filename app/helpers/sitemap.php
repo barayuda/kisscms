@@ -1,5 +1,7 @@
 <?php
 
+if( !class_exists('Sitemap') ){
+
 class Sitemap {
 
 	public $data;
@@ -14,16 +16,17 @@ class Sitemap {
 
 		if( array_key_exists('db_pages', $GLOBALS) ){
 			$dbh = $GLOBALS['db_pages'];
-			$sql = 'SELECT * FROM "pages" ORDER BY "date" DESC';
+			$sql = 'SELECT * FROM "pages" ORDER BY "updated" DESC';
 			$results = $dbh->query($sql);
 			while ($v = $results->fetch(PDO::FETCH_ASSOC)) {
 				$url = $this->makeUrlString( $v );
 				$date = $this->makeIso8601TimeStamp( $v );
-				$frequency = $this->getFrequency( $v);
+				$frequency = $this->getFrequency( $v );
 				$priority = $this->getPriority( $v );
 				$items[] = array( 'url' =>  $url, 'date' => $date, 'frequency' => $frequency, 'priority' => $priority );
 			}
 		}
+
 		return $items;
 	}
 
@@ -33,7 +36,7 @@ class Sitemap {
 	}
 
 	function makeIso8601TimeStamp($item) {
-		$dateTime = $item['date'];
+		$dateTime = date('Y-m-d H:i:s', $item['updated']);
 
 		if (is_numeric(substr($dateTime, 11, 1))) {
 			$isoTS = substr($dateTime, 0, 10) ."T"
@@ -47,10 +50,10 @@ class Sitemap {
 
 	function getFrequency( $item ) {
 
-		$now = date('Y-m-d H:i:s');
-		$last_update = $item['date'];
+		$now = time('now');
+		$last_update = $item['updated'];
 		// a precaution due to server timezone differences
-		if( strtotime( $last_update ) >= strtotime( $now ) )
+		if( $last_update >= $now )
 		{
 			$now = $last_update;
 		}
@@ -98,4 +101,5 @@ class Sitemap {
 
 }
 
+}
 ?>

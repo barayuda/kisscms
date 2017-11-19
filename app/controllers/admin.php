@@ -3,7 +3,7 @@
 class Admin extends Controller {
 
 	// add call to require login, then pass control back to parent
-	function __construct($controller_path,$web_folder,$default_controller,$default_function)  {
+	function __construct( $controller_path='controllers/', $web_folder=WEB_FOLDER, $default_controller=DEFAULT_ROUTE, $default_function=DEFAULT_ACTION ){
 		$this->require_login();
 
 		// add the config in the data object
@@ -25,7 +25,8 @@ class Admin extends Controller {
 		// check user input
 		if( isset($_POST['admin_username']) && $_POST['admin_password']){
 			$username=trim($_POST['admin_username']);
-			$password=crypt($_POST['admin_password'], $db_password);
+			$cipher = (is_null(CIPHER)) ? $_POST['admin_password'] : CIPHER;
+			$password=crypt($_POST['admin_password'], $cipher);
 			// check for the entered data
 			// #25 - leaving legacy password check for backwards compatibility (to be deprecated)
 			if( $username == $db_username && ( $password == $db_password || $_POST['admin_password'] == $db_password ) ){
@@ -60,7 +61,6 @@ class Admin extends Controller {
 	function config( $params=array() ) {
 		// if saving...
 		if( $_SERVER['REQUEST_METHOD'] == "POST" ){
-
 		// loop through all the other data and reorganise them properly
 		foreach($params as $k=>$v){
 			// exit if the values is empty (but not false)?
@@ -70,8 +70,10 @@ class Admin extends Controller {
 			if(count($name) < 2) continue;
 			$table = $name[0];
 			$key = $name[1];
-			//#25 - encrupting 'password' fields
-			$value = ( $key== "admin_password" ) ? crypt( $v ) : $v;
+			//#25 - encrypting 'password' fields
+			$cipher = (is_null(CIPHER)) ? $v : CIPHER;
+			$value = ( $key == "admin_password" ) ? crypt( $v, $cipher ) : $v;
+
 			// only save the data that has changed
 			if( $GLOBALS["config"][$table][$key] != $value ){
 				$config = new Config(0, $table);
@@ -80,12 +82,14 @@ class Admin extends Controller {
 				//$config->pkname = 'key';
 				$config->set('key', $key);
 				$config->set('value', $value);
+				// update model
 				$config->update();
 				// update memory
 				$GLOBALS["config"][$table][$key] = $value;
-			}
 
+			}
 		}
+
 		// generate the humans.txt file
 		$humans = $this->humansText();
 
@@ -131,14 +135,15 @@ class Admin extends Controller {
 
 		// see if we have found a page
 		if( $page->get('id') ){
-			// store the information of the page
+			$data = $page->getAll();
+			// clean up this old logic...
 			$data['id'] = $this->data['id'] = $page->get('id');
-			$data['title'] = stripslashes( $page->get('title') );
-			$data['content'] = stripslashes( $page->get('content') );
+			//$data['title'] = stripslashes( $page->get('title') );
+			//$data['content'] = stripslashes( $page->get('content') );
 			$data['path'] = $this->data['path'] = $page->get('path');
 			$data['tags'] = $page->get('tags');
 			$data['view'] = getPath('views/admin/edit_page.php');
-			$data['status']= $this->data['status']="edit";
+			$data['status'] = $this->data['status'] = "edit";
 			// presentation variables
 			$data['template'] = $page->get('template');
 		} else {
@@ -149,6 +154,9 @@ class Admin extends Controller {
 		// Now render the output
 		$this->data['body'][] = $data;
 		$this->data['template']= ADMIN_TEMPLATE;
+
+		// trigger event
+		Event::trigger('admin:edit', $this->data );
 
 		// display the page
 		Template::output($this->data);
@@ -177,22 +185,23 @@ class Admin extends Controller {
 		$data = array_fill_keys($fields, "");
 		$data = array_merge($data, $params);
 
+		// filter data...
+
+		$page=new Page($data['id']);
+
+		// trigger event
+		Event::trigger('admin:save', $data );
+
+		foreach( $data as $k => $v ){
+			$page->set($k, $v);
+		}
+
 		if( array_key_exists("id", $params) ){
 			// Update existing page
-			$page=new Page($data['id']);
-			$page->set('title', 	$data['title']);
-			$page->set('content', 	$data['content']);
-			$page->set('tags', 		$data['tags']);
-			$page->set('template', 	$data['template']);
 			$page->update();
 		} else {
 			// Create new page
-			$page=new Page();
-			$page->set('title', 	$data['title']);
-			$page->set('content', 	$data['content']);
-			$page->set('tags', 		$data['tags']);
-			$page->set('template', 	$data['template']);
-			$page->set('path', 		$data['path']);
+			//$page->set('path', 		$data['path']);
 			$page->create();
 		}
 

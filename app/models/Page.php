@@ -3,39 +3,95 @@ class Page extends Model {
 
 	function __construct($id=false, $table='pages') {
 		// configuration
-	$this->pkname = 'id';
-	$this->tablename = $table;
-	// the model
-	$this->rs['id'] = '';
-		$this->rs['title'] = '';
-		$this->rs['content'] = '';
-		$this->rs['path'] = '';
-		$this->rs['date']= '';
-		$this->rs['tags']= '';
-		$this->rs['template']= '';
-	// initiate parent constructor
-	parent::__construct('pages.sqlite',  $this->pkname, $this->tablename); //primary key = id; tablename = pages
+		$this->pkname = 'id';
+		$this->tablename = $table;
+		// initiate parent constructor
+		parent::__construct('pages.sqlite',  $this->pkname, $this->tablename); //primary key = id; tablename = pages
+		// the model
+		$this->schema();
+		// data container
+		if( !isset($this->rs) ) $this->rs = array();
 		// retrieve the specific page (if available)
 		if ($id){
 			$this->retrieve($id);
-		$this->id = $id;
+			$this->id = $id;
+		}
+
 	}
 
+	function retrieve( $id ) {
+		parent::read( $id );
+		// post event
+		Event::trigger('page:read', $this->rs );
 	}
 
 	function create() {
-		$this->rs['date']=date('Y-m-d H:i:s');
+		// clear all null keys (use array_filter?)
+		foreach( $this->rs as $k=>$v){
+			if( is_null($v) ) unset( $this->rs[$k] );
+		}
+		// timestamp
+		$this->rs['created'] = time('now');
+		$this->rs['updated'] = time('now');
 		return parent::create();
 	}
 
 	function update() {
-		$this->rs['date']=date('Y-m-d H:i:s');
+		// clear all null keys (use array_filter?)
+		foreach( $this->rs as $k=>$v){
+			if( is_null($v) ) unset( $this->rs[$k] );
+		}
+		$this->rs['updated'] = time('now');
 		return parent::update();
+	}
+
+	function schema( $schema=array() ){
+
+		$schema = array(
+			'id' => '',
+			'title' => '',
+			'content' => '',
+			'path' => '',
+			'created' => '',
+			'updated' => '',
+			'tags' => '',
+			'template' => ''
+		);
+
+		// merge with existing rs if it exists
+		$schema = ( isset($this->rs) ) ? array_merge( $schema, array_filter($this->rs) ) : $schema;
+
+		// get the existing columns
+		$dbh= $this->getdbh();
+		//$sql = "PRAGMA TABLE_INFO('pages')";
+		$sql = "SELECT * FROM pages LIMIT 1";
+		$results = $dbh->prepare($sql);
+		if( $results ){
+			$results->execute();
+			$page = $results->fetch(PDO::FETCH_ASSOC);
+			if( is_array($page) ){
+				foreach( $page as $key => $value ){
+					if( !array_key_exists($key, $schema) ) $schema[$key] = "";
+				}
+			}
+		}
+
+		foreach( $schema as $key => $value ){
+			if( !array_key_exists($key, $this->rs) ) $this->rs[$key] = null;
+		}
+
+		// save schema in the global namespace
+		if( !isset( $GLOBALS['db_schema'] ) ) $GLOBALS['db_schema'] = array();
+		//if( !isset( $GLOBALS['db_schema']['pages'] ) ) $GLOBALS['db_schema']['pages'] = array();
+		// update schema
+		$GLOBALS['db_schema']['pages'] = array_keys( $schema );
+
+		return $schema;
 	}
 
 	function get_page_from_path( $uri ) {
 		$dbh= $this->getdbh();
-	$sql = 'SELECT * FROM "pages" WHERE "path"="'. $uri . '" LIMIT 1';
+		$sql = 'SELECT * FROM "pages" WHERE "path"="'. $uri . '" LIMIT 1';
 		$results = $dbh->prepare($sql);
 		//$results->bindValue(1,$username);
 		$results->execute();
@@ -44,54 +100,71 @@ class Page extends Model {
 			return false;
 		foreach ($page as $k => $v)
 			$this->set($k,$v);
+		// post event
+		Event::trigger('page:read', $this->rs );
 		return true;
 	}
 
 
 	static function register($id, $key=false, $value="") {
 
-
 	// stop if variable already available
-	//if(array_key_exists($table, $GLOBALS['pages']) && array_key_exists($key, $GLOBALS['pages'][$table])) return false;
+	//if(array_key_exists("pages", $GLOBALS['db_schema']) && in_array($key, $GLOBALS['db_schema']['pages'])) return;
 
 	$page = new Page();
+	$columns = $GLOBALS['db_schema']['pages'];
 	$dbh= $page->getdbh();
 
 	// check if the pages table exists
 	$sql = "SELECT name FROM sqlite_master WHERE type='table' and name='pages'";
-		$results = $dbh->prepare($sql);
-		$results->execute();
-		$table = $results->fetch(PDO::FETCH_ASSOC);
+	$results = $dbh->prepare($sql);
+	$results->execute();
+	$table = $results->fetch(PDO::FETCH_ASSOC);
 
 	// then check if the table exists
 	if(!is_array($table)){
-		//$page->create_table("pages", implode(",", array_keys( $page->rs )) );
+		$keys = implode(", ", $columns);
 		// FIX: The id needs to be setup as autoincrement
-		$page->create_table("pages", "id INTEGER PRIMARY KEY ASC, title, content, path, date, tags, template");
+		$keys = str_replace("id,", "id INTEGER PRIMARY KEY ASC,", $keys);
+		$page->create_table("pages", $keys );
+		//$page->create_table("pages", "id INTEGER PRIMARY KEY ASC, title, content, path, date, tags, template");
 	}
 
-	$sql = "SELECT * FROM 'pages' WHERE id='$id'";
+	// add the column if necessary
+	if( array_key_exists("pages", $GLOBALS['db_schema']) && is_array($columns) && !in_array($key, $columns) ){
+		$sql = "ALTER TABLE pages ADD COLUMN ". $key;
 		$results = $dbh->prepare($sql);
+		if( $results ) $results->execute(); // there's a case where the column may already exist, in which case this will be false...
+		array_push( $columns, $key );
+	}
+
+	// get existing page (again?)
+	$sql = "SELECT * FROM 'pages' WHERE id='$id'";
+	$results = $dbh->prepare($sql);
+	if( $results ){
 		$results->execute();
 		$pages = $results->fetch(PDO::FETCH_ASSOC);
-
+	} else {
+		$pages = false;
+	}
 	// just create the key
 	if( !$pages ) {
 		$newpage = new Page();
 		$newpage->set('id', "$id");
 		if($key)
-			$page->set("$key", "$value");
+			$newpage->set("$key", "$value");
 		$newpage->create();
 
 	} else {
-		if($key)
+		if($key){
 			$mypage = new Page($id);
-			$value = $mypage->get("$key");
+			$existing = $mypage->get("$key");
 			// allow empty strings to be returned
-			if( empty($value) && $value != "" ){
+			if( is_null($existing) ){
 				$mypage->set("$key", "$value");
 				$mypage->update();
 			}
+		}
 	}
 
 	}

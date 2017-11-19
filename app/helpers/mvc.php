@@ -9,11 +9,39 @@ class Model extends KISS_Model  {
 
 	function __construct($db='pages.sqlite', $pkname='',$tablename='',$dbhfnname='getdbh',$quote_style='MYSQL',$compress_array=true) {
 		$this->db=$db; //Name of the database
-		$this->pkname=$pkname; //Name of auto-incremented Primary Key
-		$this->tablename=$tablename; //Corresponding table in database
+		if( !isset($this->pkname) ) $this->pkname=$pkname; //Name of auto-incremented Primary Key
+		if( !isset($this->tablename) ) $this->tablename=$tablename; //Corresponding table in database
 		$this->dbhfnname=$dbhfnname; //dbh function name
 		$this->QUOTE_STYLE=$quote_style;
 		$this->COMPRESS_ARRAY=$compress_array;
+		// post-construct init...
+		$this->init();
+	}
+
+//===============================================
+// Initialization
+//===============================================
+
+	protected function init() {
+		// conditions for local dbs
+		if( is_scalar($this->db) && substr( $this->db, -6 ) === "sqlite" ){
+			// check if the pages table exists
+			$dbh = $this->getdbh();
+			$sql = "SELECT name FROM sqlite_master WHERE type='table'";
+			$results = $dbh->prepare($sql);
+			$results->execute();
+			$table = $results->fetch(PDO::FETCH_ASSOC);
+			// then check if the table exists
+			if(!is_array($table)){
+				$data = $this->schema();
+				// exit now if there's not schema
+				if( !$data ) return;
+				$keys = implode(", ", array_keys( $data ));
+				// FIX: The id needs to be setup as autoincrement
+				$keys = str_replace("id,", "id INTEGER PRIMARY KEY ASC,", $keys);
+				$this->create_table( $this->tablename, $keys );
+			}
+		}
 	}
 
 //===============================================
@@ -23,16 +51,22 @@ class Model extends KISS_Model  {
 		// generate the name prefix
 		$db_name = "db_" . substr( $this->db, 0, stripos($this->db, ".") );
 		if (!isset($GLOBALS[ $db_name ])) {
+
 			try {
-			  $GLOBALS[ $db_name ] = new PDO('sqlite:'. DATA . $this->db);
-			  //$GLOBALS['dbh'] = new PDO('mysql:host=localhost;dbname=dbname', 'username', 'password');
+				$db = new PDO('sqlite:'. DATA . $this->db, null, null, array(
+					PDO::ATTR_PERSISTENT => true
+				));
+				// FIX: disable sync to improve performance
+				$db->exec("pragma synchronous = off;");
+				$GLOBALS[ $db_name ] = $db;
+				//$GLOBALS['dbh'] = new PDO('mysql:host=localhost;dbname=dbname', 'username', 'password');
 			} catch (PDOException $e) {
 				// Continue logic on a specific error code (14: unable to open database file)
 				$error = (string)$e->getCode();
 				if( $error == "14" ){
-								  // #79 report last error on SQLite fail
-								  print_r(error_get_last());
-								  // see if there is a data directory
+					// #79 report last error on SQLite fail
+					print_r(error_get_last());
+					// see if there is a data directory
 					if( !is_dir( DATA ) ){
 						// create the directory with write access
 						mkdir( DATA, 0775);
@@ -49,11 +83,107 @@ class Model extends KISS_Model  {
 		//return call_user_func($this->dbhfnname, $this->db);
 	}
 
-	//Example of adding your own method to the core class
-	function gethtmlsafe($key) {
-		return htmlspecialchars($this->get($key));
+	function schema( $schema=array() ){
+		//
+		if( !isset($this->rs) ) $this->rs = array();
+		$this->rs = array_merge( $schema, $this->rs );
+		$name = ( isset($this->name) ) ? $this->name : strtolower( __CLASS__  );
+		// save schema in the global namespace
+		if( !isset( $GLOBALS['db_schema'] ) ) $GLOBALS['db_schema'] = array();
+		if( !isset( $GLOBALS['db_schema'][$name] ) ) $GLOBALS['db_schema'][$name] = array();
+
+		$GLOBALS['db_schema'][$name] = $this->rs;
+
+		return $this->rs;
 	}
 
+	function set($key, $val) {
+		// checking if key exists instead of value...
+		if ( array_key_exists($key, $this->rs) )
+			$this->rs[$key] = $val;
+		return $this;
+	}
+
+//===============================================
+// CRUD methods
+//===============================================
+
+	function read($pkvalue) {
+		$dbh=$this->getdbh();
+		$sql = 'SELECT * FROM '.$this->enquote($this->tablename).' WHERE '.$this->enquote($this->pkname).'=?';
+		$stmt = $dbh->prepare($sql);
+		// error control
+		if( !$stmt ) return $this;
+		$stmt->bindValue(1,(int)$pkvalue);
+		$stmt->execute();
+		$rs = $stmt->fetch(PDO::FETCH_ASSOC);
+		if ($rs){
+			foreach ($rs as $key => $val){
+				//if (isset($this->rs[$key]))
+				//$this->rs[$key] = is_scalar($this->rs[$key]) ? $val : unserialize($this->COMPRESS_ARRAY ? gzinflate($val) : $val);
+				$this->rs[$key] = $val;
+			}
+		}
+		return $this;
+	}
+
+
+//===============================================
+// Query methods
+//===============================================
+
+	// run a lookup query based on a field
+	function find($a= false, $b=false){
+		$query = "";
+		if( !$b && is_array( $a ) ){
+			foreach( $a as $key => $value ){
+				if( !empty($query) ) $query .=" AND ";
+				$query .= $key ."='". $value ."'";
+			}
+		} else if( !$b && is_scalar( $a ) ) {
+			//
+			$query .= $a;
+		} else if( !$b && !$a ) {
+			// prerequisite
+			return null;
+		} else {
+			// assume both are scalar...
+			$query .= $a ."='". $b ."'";
+		}
+		// execute
+		$data = $this->retrieve_many( $query );
+		return $data;
+	}
+
+	// run a lookup query based on a field, returns first item
+	function findOne($a= false, $b=false){
+		// same as find...
+		$query = "";
+		if( !$b && is_array( $a ) ){
+			foreach( $a as $key => $value ){
+				if( !empty($query) ) $query .=" AND ";
+				$query .= $key ."='". $value ."'";
+			}
+		} else if( !$b && is_scalar( $a ) ) {
+			//
+			$query .= $a;
+		} else if( !$b && !$a ) {
+			// prerequisite
+			return null;
+		} else {
+			// assume both are scalar...
+			$query .= $a ."='". $b ."'";
+		}
+		// execute
+		$data = $this->retrieve_many( $query ); // replace with retrieve_one?
+		// return only the first - fix this by limiting the query
+		return ( count($data) ) ? $data[0] : false;
+	}
+
+
+//===============================================
+// Table methods
+//===============================================
 
 	function create_table($name, $fields, $db=false){
 		$dbh = $this->getdbh();
@@ -95,23 +225,49 @@ class Model extends KISS_Model  {
 		return $this;
 	}
 
+	// merge the existing data of a key
+	function extend($key=false, $data=array()){
+		// prerequisite
+		if(!$key) return false;
+		// first get existing data
+		$value = $this->get( $key );
+		// get returns false only when it doesn't find a value?
+		//if( $value === false ) return;
+		// different condition for scalar?
+		if( is_null($value) || is_scalar($value) ) {
+			$value = $data;
+		} else {
+			// array?
+			$value = array_merge( (array)$value, (array)$data );
+		}
+		// either way save back...
+		$this->set( $key, $value);
+	}
+
 	function retrieve_many($wherewhat='',$bindings='') {
 		$dbh=$this->getdbh();
-		if (is_scalar($bindings))
-			$bindings=$bindings ? array($bindings) : array();
-		$sql = 'SELECT * FROM '.$this->tablename;
-		if ($wherewhat)
-			$sql .= ' WHERE '.$wherewhat;
-		$stmt = $dbh->prepare($sql);
-		$stmt->execute($bindings);
 		$arr=array();
+		if( is_scalar($bindings) ){
+			$bindings=$bindings ? array($bindings) : array();
+		}
+		$sql = 'SELECT * FROM '.$this->tablename;
+		if( $wherewhat ){
+			$sql .= ' WHERE '.$wherewhat;
+		}
+		$stmt = $dbh->prepare($sql);
+		if( !$stmt ) return $arr;
+		$stmt->execute($bindings);
 		$class=get_class($this);
-		while ($rs = $stmt->fetch(PDO::FETCH_ASSOC)) {
+		while($rs = $stmt->fetch(PDO::FETCH_ASSOC)){
 			$myclass = new $class($this->id, $this->tablename);
-			foreach ($rs as $key => $val)
-				if (isset($myclass->rs[$key]))
-					$myclass->rs[$key] = is_scalar($myclass->rs[$key]) ? $val : unserialize($this->COMPRESS_ARRAY ? gzinflate($val) : $val);
-				$arr[]= $myclass->rs;
+			$myschema = $myclass->schema();
+			foreach($rs as $key => $val){
+				if( isset($myclass->rs[$key]) || is_null($myclass->rs[$key]) ){
+					//$myclass->rs[$key] = is_scalar($myclass->rs[$key]) ? $val : unserialize($this->COMPRESS_ARRAY ? gzinflate($val) : $val);
+					$myclass->rs[$key] = is_scalar( $myschema[$key] ) ? $val : json_decode($val, true);
+				}
+			}
+			$arr[]= $myclass->rs;
 		}
 		return $arr;
 	}
@@ -120,7 +276,7 @@ class Model extends KISS_Model  {
 		if (isset($this->rs[$key]))
 			return $this->rs[$key];
 		else
-			return false;
+			return null;
 	}
 
 	function getAll(){
@@ -129,7 +285,7 @@ class Model extends KISS_Model  {
 		foreach($this->rs as $k=>$v){
 			$result = $this->get($k);
 			// don't add data that 's returned as 'false'
-			if( $result ) $array[$k] = $result;
+			if( !is_null($result) ) $array[$k] = ( is_string($result) ) ? stripslashes( $result ) : $result;
 		}
 		return $array;
 	}
@@ -146,6 +302,45 @@ class Model extends KISS_Model  {
 		}
 	}
 
+//===============================================
+// Helper methods
+//===============================================
+
+	//Example of adding your own method to the core class
+	function gethtmlsafe($key) {
+		return htmlspecialchars($this->get($key));
+	}
+
+	// #115 generate a random UUID v4
+	function uuid() {
+		return sprintf( '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+			// 32 bits for "time_low"
+			mt_rand( 0, 0xffff ), mt_rand( 0, 0xffff ),
+
+			// 16 bits for "time_mid"
+			mt_rand( 0, 0xffff ),
+
+			// 16 bits for "time_hi_and_version",
+			// four most significant bits holds version number 4
+			mt_rand( 0, 0x0fff ) | 0x4000,
+
+			// 16 bits, 8 bits for "clk_seq_hi_res",
+			// 8 bits for "clk_seq_low",
+			// two most significant bits holds zero and one for variant DCE1.1
+			mt_rand( 0, 0x3fff ) | 0x8000,
+
+			// 48 bits for "node"
+			mt_rand( 0, 0xffff ), mt_rand( 0, 0xffff ), mt_rand( 0, 0xffff )
+		);
+	}
+
+	function CommonID() {
+		//
+		$now = strtotime("now");
+		$random = dechex( $now * rand(1000000, 9999999) );
+		return  $random . dechex( $now );
+	}
+
 }
 
 //===============================================================
@@ -155,9 +350,18 @@ class Controller extends KISS_Controller {
 
 	public $data;
 
-	function __construct($controller_path,$web_folder,$default_controller,$default_function)  {
+	function __construct( $controller_path='controllers/', $web_folder=WEB_FOLDER, $default_controller=DEFAULT_ROUTE, $default_function=DEFAULT_ACTION )  {
 		// generic redirection for secure connections (assuming that ssl is on port 443)
-		if( defined('SSL') && SSL && $_SERVER['SERVER_PORT'] != "443" ) header('Location: '.url( request_uri() ) );
+		if( defined('SSL') && SSL && $_SERVER['SERVER_PORT'] != "443" ) header('Location: '. url( request_uri() ) );
+
+		// html cache on only in production
+		$cached = ( DEBUG ) ? false : $this->_pageCache();
+		if( !empty($cached) ){
+			echo $cached;
+			// exit now
+			exit;
+			//return;
+		}
 
 		// add the config in the data object
 		$this->data['config'] = $GLOBALS['config'];
@@ -168,18 +372,28 @@ class Controller extends KISS_Controller {
 		$template = strtolower( get_class($this) ) .".php";
 		$this->data['template']= ( is_file( TEMPLATES.$template ) ) ? $template : false;
 
+		// #116 add site info in the client object
+		$GLOBALS['client']['site']['name'] = $GLOBALS['config']['main']['site_name'];
+		$url = url();
+		// FIX: removing ending slash
+		$GLOBALS['client']['site']['url'] = ( substr( $url, -1) == "/" ) ? substr( $url, 0, -1) : $url;
+
 		parent::__construct($controller_path,$web_folder,$default_controller,$default_function);
 	}
 
+	// display the client vars
 	function client_js() {
-		// set the right header
-		header('Content-Type: application/javascript');
-		// display the client vars
+		// container
+		if( !array_key_exists("_client", $_SESSION) || !is_array($_SESSION["_client"]) )
+				$_SESSION["_client"] = array();
+		//
 		$path = null;
 		if( !empty( $_SERVER["HTTP_REFERER"] ) ){
 			$url = parse_url ( $_SERVER["HTTP_REFERER"] );
-			$path = $url['path'];
+			$path = ( array_key_exists('path', $url) ) ? $url['path'] : "/";
 		}
+		// set the right header
+		header('Content-Type: application/javascript');
 		echo ( !empty( $_SESSION["_client"][$path] ) ) ? $_SESSION["_client"][$path] : "";
 	}
 
@@ -275,6 +489,8 @@ class Controller extends KISS_Controller {
 		$path = ( substr($path, -1) == "/" ) ? substr($path, 0, -1) : $path;
 		// save the path for later use by controllers and helpers
 		$GLOBALS['path'] = $this->data['path'] = $path;
+		// save a reference to the endpoint
+		$this->_endpoint = $function;
 
 		// call the method
 		$this->$function($params);
@@ -283,12 +499,12 @@ class Controller extends KISS_Controller {
 
 	//Example of overriding a core class method with your own
 	function request_not_found() {
-		die(View::do_fetch(  getPath('views/errors/404.php') ));
+		die(View::do_fetch( getPath('views/errors/404.php') ));
 	}
 
 	function require_login() {
-	  if (!isset($_SESSION['admin']) && $_SERVER['REQUEST_URI'] != WEB_FOLDER.'admin/login')
-		$this->redirect('admin/login');
+		if (!isset($_SESSION['admin']) && $_SERVER['REQUEST_URI'] != WEB_FOLDER.'admin/login')
+			$this->redirect('admin/login');
 	}
 
 	function redirect($path, $window=false) {
@@ -301,7 +517,34 @@ class Controller extends KISS_Controller {
 		exit;
 	}
 
-	function render() {
+	function render( $view=false) {
+		$class = strtolower( get_class($this) );
+		// #122 adding page info
+		if( !array_key_exists("_page", $this->data) ) $this->data["_page"] = array();
+		$this->data["_page"]['controller'] = $class;
+		$this->data["_page"]['view'] = $view or "";
+		// process custom body view (if available)
+		if( !$view ) $view = "body-". $this->_endpoint;
+		// include a default view for body sections
+		//$this->data["body"][$class]["view"] = ($view) ? getPath('views/'.$class.'/'. $view .'.php') : getPath('views/'.$class.'/body.php');
+		// get the actual path of the view
+		$view = getPath('views/'.$class.'/'. $view .'.php');
+		// FIX: ultimate fallback
+		if( !$view ) $view = getPath('views/main/body.php');
+		//
+		if( array_key_exists("body" , $this->data ) ){
+			foreach( $this->data["body"] as $k => $v ){
+				if( !is_array($v) ) $v = array();
+				if( !array_key_exists("view", $v) ){
+					$this->data["body"][$k]["view"] = ($view) ? $view : getPath('views/'.$class.'/body.php');
+				}
+			}
+		} else {
+			// there are no body data - may still be a "static" view
+			$this->data["body"] = array();
+			$this->data["body"][$class]["view"] = ($view) ? $view : getPath('views/'.$class.'/body.php');
+		}
+		Event::trigger('page:render', $view, $this->data);
 		// display the page
 		Template::output($this->data);
 	}
@@ -381,6 +624,17 @@ class Controller extends KISS_Controller {
 			header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
 
 	}
+
+	// Internal
+	function _pageCache(){
+		// compile md5 from: session id + request data + request uri
+		$key = md5( session_id() . json_encode($_REQUEST) . $_SERVER['REQUEST_URI'] );
+		// if a file with that id exists and it's relatively new, use it...
+		$id = "{$_SERVER['HTTP_HOST']}/html/". $key;
+		$cache = Template::getCache( $id );
+		// return cache if any...
+		return $cache;
+	}
 }
 
 //===============================================================
@@ -392,6 +646,13 @@ class View extends KISS_View {
 	function __construct($file='',$vars='') {
 		$file =  getPath('views/'.$file);
 		return parent::__construct($file,$vars);
+	}
+
+	static function do_fetch($file='',$vars='') {
+		$view = parent::do_fetch($file,$vars);
+		// post-event
+		Event::trigger('view:parse', $view, $vars );
+		return $view;
 	}
 
 }
